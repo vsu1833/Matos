@@ -1,0 +1,8 @@
+yfinance==0.2.40
+pandas-ta-openbb
+pandas==2.2.0
+numpy==1.26.4
+anthropic==0.25.0
+hmmlearn==0.3.2
+scikit-learn==1.4.2
+python-dotenv==1.0.1
