@@ -5,12 +5,14 @@ Utilities for fetching and exporting historical OHLCV data.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import pandas_ta as ta
 import yfinance as yf
 
 # Keep yfinance timezone cache inside the repository.
@@ -35,6 +37,16 @@ from config import (  # noqa: E402
 
 
 EXPORT_DIR = Path(__file__).resolve().parent / "csv"
+FEATURE_COLUMNS = [
+    "close",
+    "returns",
+    "ema20",
+    "ema50",
+    "rsi",
+    "macd",
+    "volatility",
+    "volume",
+]
 
 
 def _assign_label(forward_return: float) -> str:
@@ -64,6 +76,26 @@ def _series_or_default(raw: pd.DataFrame, column: str, default: float = 0.0) -> 
     return values.fillna(default).astype(float)
 
 
+def _add_lstm_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["returns"] = df["close"].pct_change()
+
+    df.ta.ema(close=df["close"], length=20, append=True)
+    df.ta.ema(close=df["close"], length=50, append=True)
+    df.ta.rsi(close=df["close"], length=14, append=True)
+    df.ta.macd(close=df["close"], fast=12, slow=26, signal=9, append=True)
+    df.ta.stdev(close=df["returns"], length=20, append=True)
+
+    df["ema20"] = df["EMA_20"]
+    df["ema50"] = df["EMA_50"]
+    df["rsi"] = df["RSI_14"]
+    df["macd"] = df["MACD_12_26_9"]
+    df["volatility"] = df["STDEV_20"]
+
+    df = df[FEATURE_COLUMNS].copy()
+    return df
+
+
 def _normalize_history(
     raw: pd.DataFrame,
     ticker: str,
@@ -90,11 +122,6 @@ def _normalize_history(
     df["close"] = raw["Close"].astype(float)
     df["volume"] = raw["Volume"].fillna(0).astype("int64")
 
-    # Keep corporate action columns so downstream analysis can inspect why prices changed.
-    df["dividends"] = _series_or_default(raw, "Dividends")
-    df["stock_splits"] = _series_or_default(raw, "Stock Splits")
-    df["capital_gains"] = _series_or_default(raw, "Capital Gains")
-
     before = len(df)
     df = df[df["volume"] >= MIN_VOLUME].copy()
     dropped = before - len(df)
@@ -114,13 +141,16 @@ def _normalize_history(
     if min_rows is not None and len(df) < min_rows:
         raise ValueError(f"{ticker}: only {len(df)} rows; need {min_rows}+")
 
-    df["returns"] = df["close"].pct_change()
+    df = _add_lstm_features(df)
 
     if add_labels:
         df["forward_return"] = df["close"].pct_change(FORWARD_RETURN_DAYS).shift(
             -FORWARD_RETURN_DAYS
         )
         df["label"] = df["forward_return"].apply(_assign_label)
+        df = df[FEATURE_COLUMNS + ["forward_return", "label"]]
+    else:
+        df = df[FEATURE_COLUMNS]
 
     df.index.name = "date"
     return df
@@ -130,7 +160,7 @@ def fetch_ticker(
     ticker: str,
     start: str = FETCH_START,
     end: str = BACKTEST_END,
-    add_labels: bool = True,
+    add_labels: bool = False,
     export_dir: str | Path = EXPORT_DIR,
     use_cache: bool = True,
     min_rows: int | None = None,
@@ -198,7 +228,7 @@ def fetch_all(
     tickers: list[str] | None = None,
     start: str = FETCH_START,
     end: str = BACKTEST_END,
-    add_labels: bool = True,
+    add_labels: bool = False,
     export_dir: str | Path = EXPORT_DIR,
     use_cache: bool = True,
     min_rows: int | None = 210,
@@ -225,7 +255,7 @@ def fetch_all(
 
 def export_configured_universe(
     export_dir: str | Path = EXPORT_DIR,
-    add_labels: bool = True,
+    add_labels: bool = False,
     use_cache: bool = True,
     min_rows: int | None = 210,
 ) -> dict[str, pd.DataFrame]:
@@ -264,9 +294,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory inside the repository where CSVs will be written.",
     )
     parser.add_argument(
-        "--no-labels",
+        "--with-labels",
         action="store_true",
-        help="Skip forward-return labels in the exported CSV.",
+        help="Also include forward_return and label columns in the exported CSV.",
     )
     parser.add_argument(
         "--refresh",
@@ -284,13 +314,13 @@ if __name__ == "__main__":
             ticker=args.ticker,
             start=args.start,
             end=args.end,
-            add_labels=not args.no_labels,
+            add_labels=args.with_labels,
             export_dir=args.export_dir,
             use_cache=not args.refresh,
         )
     else:
         export_configured_universe(
             export_dir=args.export_dir,
-            add_labels=not args.no_labels,
+            add_labels=args.with_labels,
             use_cache=not args.refresh,
         )
